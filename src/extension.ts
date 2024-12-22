@@ -6,6 +6,18 @@ import * as vscode from "vscode";
 export function activate(context: vscode.ExtensionContext) {
   // Register the TreeView
   const todoTreeDataProvider = new TodoTreeDataProvider();
+  const treeView = vscode.window.createTreeView("todoTracker", {
+    treeDataProvider: todoTreeDataProvider,
+  });
+
+  // Update the badge when TODOs are refreshed
+  todoTreeDataProvider.onDidChangeTodoCount((count) => {
+    treeView.badge = {
+      value: count,
+      tooltip: `${count} TODO(s) found`,
+    };
+  });
+
   vscode.window.registerTreeDataProvider("todoTracker", todoTreeDataProvider);
 
   // Refresh the TreeView when manually triggered
@@ -30,6 +42,11 @@ class TodoTreeDataProvider implements vscode.TreeDataProvider<TodoTreeItem> {
   readonly onDidChangeTreeData: vscode.Event<TodoTreeItem | undefined | void> =
     this._onDidChangeTreeData.event;
 
+  private _onDidChangeTodoCount: vscode.EventEmitter<number> =
+    new vscode.EventEmitter<number>();
+  readonly onDidChangeTodoCount: vscode.Event<number> =
+    this._onDidChangeTodoCount.event;
+
   private todos: TodoTreeItem[] = [];
 
   constructor() {
@@ -53,8 +70,10 @@ class TodoTreeDataProvider implements vscode.TreeDataProvider<TodoTreeItem> {
 
   refresh(): void {
     this.todos = [];
-    this.scanWorkspaceForTodos();
-    this._onDidChangeTreeData.fire();
+    this.scanWorkspaceForTodos().then(() => {
+      this._onDidChangeTreeData.fire();
+      this._onDidChangeTodoCount.fire(this.todos.length);
+    });
   }
 
   getChildren(element?: TodoTreeItem): Thenable<TodoTreeItem[]> {
@@ -74,36 +93,35 @@ class TodoTreeDataProvider implements vscode.TreeDataProvider<TodoTreeItem> {
       return;
     }
 
-    const todoPattern = /\/\/\s*TODO:(.*)/g;
+    const todoPattern = /\/\/\s*TODO:(.*)/;
 
-    await vscode.workspace
-      .findFiles(
-        "**/*.{js,ts,jsx,tsx,html,css}",
-        "**/{node_modules,.git,dist,out}/**"
-      )
-      .then((files) => {
-        files.forEach((file) => {
-          vscode.workspace.openTextDocument(file).then((document) => {
-            const text = document.getText();
-            const lines = text.split("\n");
-            lines.forEach((line, index) => {
-              const match = todoPattern.exec(line);
-              if (match) {
-                this.todos.push(
-                  new TodoTreeItem(
-                    match[1].trim(),
-                    `${document.fileName} - Line ${index + 1}`,
-                    file,
-                    index + 1
-                  )
-                );
-              }
-            });
-          });
-        });
+    const files = await vscode.workspace.findFiles(
+      "**/*.{js,ts,jsx,tsx,html,css}",
+      "**/{node_modules,.git,dist,out}/**"
+    );
+
+    const todoPromises = files.map(async (file) => {
+      const document = await vscode.workspace.openTextDocument(file);
+      const text = document.getText();
+      const lines = text.split("\n");
+
+      lines.forEach((line, index) => {
+        todoPattern.lastIndex = 0; // Reset regex state
+        const match = todoPattern.exec(line);
+        if (match) {
+          this.todos.push(
+            new TodoTreeItem(
+              match[1].trim(),
+              `${document.fileName} - Line ${index + 1}`,
+              file,
+              index + 1
+            )
+          );
+        }
       });
+    });
 
-    this._onDidChangeTreeData.fire();
+    await Promise.all(todoPromises); // Wait for all files to be processed
   }
 }
 
