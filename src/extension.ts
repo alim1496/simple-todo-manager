@@ -29,6 +29,7 @@ export function activate(context: vscode.ExtensionContext) {
     }
   );
 
+  todoTreeDataProvider.refresh();
   context.subscriptions.push(disposable);
 }
 
@@ -72,7 +73,6 @@ class TodoTreeDataProvider implements vscode.TreeDataProvider<TodoTreeItem> {
     this.todos = [];
     this.scanWorkspaceForTodos().then(() => {
       this._onDidChangeTreeData.fire();
-      this._onDidChangeTodoCount.fire(this.todos.length);
     });
   }
 
@@ -80,7 +80,7 @@ class TodoTreeDataProvider implements vscode.TreeDataProvider<TodoTreeItem> {
     if (!element) {
       return Promise.resolve(this.todos);
     }
-    return Promise.resolve([]);
+    return Promise.resolve(element.children);
   }
 
   getTreeItem(element: TodoTreeItem): vscode.TreeItem {
@@ -100,16 +100,20 @@ class TodoTreeDataProvider implements vscode.TreeDataProvider<TodoTreeItem> {
       "**/{node_modules,.git,dist,out}/**"
     );
 
+    const fileToTodosMap: Map<string, TodoTreeItem[]> = new Map();
+    let totalTodoCount = 0;
+
     const todoPromises = files.map(async (file) => {
       const document = await vscode.workspace.openTextDocument(file);
       const text = document.getText();
       const lines = text.split("\n");
+      const todos: TodoTreeItem[] = [];
 
       lines.forEach((line, index) => {
-        todoPattern.lastIndex = 0; // Reset regex state
+        todoPattern.lastIndex = 0;
         const match = todoPattern.exec(line);
         if (match) {
-          this.todos.push(
+          todos.push(
             new TodoTreeItem(
               match[1].trim(),
               `${document.fileName} - Line ${index + 1}`,
@@ -117,11 +121,31 @@ class TodoTreeDataProvider implements vscode.TreeDataProvider<TodoTreeItem> {
               index + 1
             )
           );
+          totalTodoCount++;
         }
       });
+
+      if (todos.length > 0) {
+        fileToTodosMap.set(file.fsPath, todos);
+      }
     });
 
-    await Promise.all(todoPromises); // Wait for all files to be processed
+    await Promise.all(todoPromises);
+
+    this.todos = Array.from(fileToTodosMap.entries()).map(
+      ([filePath, todos]) => {
+        const fileName = vscode.workspace.asRelativePath(filePath);
+        return new TodoTreeItem(
+          fileName,
+          `${todos.length}`,
+          undefined,
+          null,
+          todos
+        );
+      }
+    );
+
+    this._onDidChangeTodoCount.fire(totalTodoCount);
   }
 }
 
@@ -129,15 +153,27 @@ class TodoTreeItem extends vscode.TreeItem {
   constructor(
     public readonly label: string,
     public readonly description: string,
-    public readonly resourceUri: vscode.Uri,
-    private readonly lineNumber: number
+    public readonly resourceUri: vscode.Uri | undefined = undefined,
+    public readonly lineNumber: number | null = null,
+    public readonly children: TodoTreeItem[] = []
   ) {
-    super(label, vscode.TreeItemCollapsibleState.None);
-    this.tooltip = `${this.label} - ${this.description}`;
-    this.command = {
-      command: "vscode.open",
-      arguments: [this.resourceUri.with({ fragment: `L${this.lineNumber}` })],
-      title: "Open TODO",
-    };
+    super(
+      label,
+      children.length > 0
+        ? vscode.TreeItemCollapsibleState.Collapsed
+        : vscode.TreeItemCollapsibleState.None
+    );
+
+    this.tooltip = this.lineNumber
+      ? `${this.label} - Line ${this.lineNumber}`
+      : this.label;
+
+    if (this.resourceUri && this.lineNumber !== null) {
+      this.command = {
+        command: "vscode.open",
+        arguments: [this.resourceUri.with({ fragment: `L${this.lineNumber}` })],
+        title: "Open TODO",
+      };
+    }
   }
 }
